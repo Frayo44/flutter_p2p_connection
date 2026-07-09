@@ -88,6 +88,20 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     groupClients = "[]"
   }
 
+  private fun clientsJson(group: WifiP2pGroup?): String {
+    if (group == null) return "[]"
+    var clients: String = ""
+    for (device: WifiP2pDevice in group.clientList) {
+      val re = Regex("[^A-Za-z0-9 ']")
+      val name = re.replace(device.deviceName, "")
+      clients = clients + "{\"deviceName\": \"${name}\", \"deviceAddress\": \"${device.deviceAddress}\", \"isGroupOwner\": ${device.isGroupOwner}, \"isServiceDiscoveryCapable\": ${device.isServiceDiscoveryCapable}, \"primaryDeviceType\": \"${device.primaryDeviceType}\", \"secondaryDeviceType\": \"${device.secondaryDeviceType}\", \"status\": ${device.status}}, "
+    }
+    if (clients.length > 0) {
+      clients = clients.subSequence(0, clients.length - 2).toString()
+    }
+    return "[${clients}]"
+  }
+
   override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: Result) {
     if (call.method == "getPlatformVersion") {
       result.success("Android: ${android.os.Build.VERSION.RELEASE}")
@@ -296,22 +310,10 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
           WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
             // Respond to new connection or disconnections
             wifimanager.requestGroupInfo(wifichannel, WifiP2pManager.GroupInfoListener { group: WifiP2pGroup? ->
-            if (group != null) {
-                var clients: String = ""
-                for (device: WifiP2pDevice in group.clientList) {
-                  val re = Regex("[^A-Za-z0-9 ']")
-                  val name = re.replace(device.deviceName, "") // 
-                  clients = clients + "{\"deviceName\": \"${name}\", \"deviceAddress\": \"${device.deviceAddress}\", \"isGroupOwner\": ${device.isGroupOwner}, \"isServiceDiscoveryCapable\": ${device.isServiceDiscoveryCapable}, \"primaryDeviceType\": \"${device.primaryDeviceType}\", \"secondaryDeviceType\": \"${device.secondaryDeviceType}\", \"status\": ${device.status}}, "
-                }
-                if (clients.length > 0) {
-                  clients = clients.subSequence(0, clients.length-2).toString()
-                }
-                groupClients = "[${clients}]"
-              } else {
-                // The group is gone; without this the stale client list keeps
-                // the Dart side believing the connection is still alive.
-                groupClients = "[]"
-              }
+              // A null group means it's gone; without the reset the stale
+              // client list keeps the Dart side believing the connection is
+              // still alive.
+              groupClients = clientsJson(group)
             })
             val networkInfo: NetworkInfo? = intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO)
             val wifiP2pInfo: WifiP2pInfo? = intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_INFO)
@@ -575,25 +577,32 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     override fun onListen(p0: Any?, sink: EventChannel.EventSink) {
       runnable?.let { handler.removeCallbacks(it) }
       eventSink = sink
-      var networkinfo: NetworkInfo? = null
-      var wifip2pinfo: WifiP2pInfo? = null
+      var lastEmitted: String? = null
       val r: Runnable = object : Runnable {
         override fun run() {
           handler.post {
             val ni: NetworkInfo? = EnetworkInfo
             val wi: WifiP2pInfo? = EwifiP2pInfo
-            if (ni != null && wi != null) {
-              if (networkinfo != ni || wifip2pinfo != wi) {
-                networkinfo = ni
-                wifip2pinfo = wi
-                eventSink?.success("{\"isConnected\": ${ni.isConnected}, \"isGroupOwner\": ${wi.isGroupOwner}, \"groupOwnerAddress\": \"${wi.groupOwnerAddress}\", \"groupFormed\": ${wi.groupFormed}, \"clients\": ${groupClients}}")
-              }
-            } else if (networkinfo != null || wifip2pinfo != null) {
-              // The group died and the cached state was cleared: tell the Dart
-              // side once (it maps "null" to a disconnected WifiP2PInfo).
-              networkinfo = null
-              wifip2pinfo = null
-              eventSink?.success("null")
+            // While connected, keep the client list fresh: it is fetched
+            // asynchronously and the join of a client does not always fire
+            // another CONNECTION_CHANGED broadcast. The group owner's
+            // Dart-side isConnected depends on this list being non-empty.
+            if (ni != null && ni.isConnected && this@FlutterP2pConnectionPlugin::wifimanager.isInitialized) {
+              wifimanager.requestGroupInfo(wifichannel, WifiP2pManager.GroupInfoListener { group: WifiP2pGroup? ->
+                groupClients = clientsJson(group)
+              })
+            }
+            // Compare the full payload rather than the info objects, so a
+            // late-arriving client list still gets emitted. "null" (group
+            // death) also falls out of this comparison, emitted exactly once.
+            val payload: String = if (ni != null && wi != null) {
+              "{\"isConnected\": ${ni.isConnected}, \"isGroupOwner\": ${wi.isGroupOwner}, \"groupOwnerAddress\": \"${wi.groupOwnerAddress}\", \"groupFormed\": ${wi.groupFormed}, \"clients\": ${groupClients}}"
+            } else {
+              "null"
+            }
+            if (payload != lastEmitted) {
+              lastEmitted = payload
+              eventSink?.success(payload)
             }
           }
           handler.postDelayed(this, 1000)
