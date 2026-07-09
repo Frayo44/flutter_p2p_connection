@@ -61,6 +61,31 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     CfoundPeers.setStreamHandler(FoundPeersHandler)
     CConnectedPeers = EventChannel(flutterPluginBinding.binaryMessenger, "flutter_p2p_connection_connectedPeers")
     CConnectedPeers.setStreamHandler(ConnectedPeersHandler)
+    // Set up the intent filter here (not in initialize()) so a resume() that
+    // arrives before initialize() still registers a receiver that hears events,
+    // and repeated initialize() calls don't accumulate duplicate actions.
+    if (intentFilter.countActions() == 0) {
+      intentFilter.addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
+      intentFilter.addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
+      intentFilter.addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
+      intentFilter.addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
+    }
+  }
+
+  private fun reasonString(reasonCode: Int): String {
+    return when (reasonCode) {
+      WifiP2pManager.ERROR -> "ERROR"
+      WifiP2pManager.P2P_UNSUPPORTED -> "P2P_UNSUPPORTED"
+      WifiP2pManager.BUSY -> "BUSY"
+      WifiP2pManager.NO_SERVICE_REQUESTS -> "NO_SERVICE_REQUESTS"
+      else -> "UNKNOWN($reasonCode)"
+    }
+  }
+
+  private fun clearConnectionState() {
+    EnetworkInfo = null
+    EwifiP2pInfo = null
+    groupClients = "[]"
   }
 
   override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: Result) {
@@ -88,12 +113,10 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
       }
     } else if (call.method == "connect") {
       try {
-        print("calling connect");
         val address: String = call.argument("address") ?: ""
         connect(result, address)
-        print("after calling connect");
       } catch (e: Exception) {
-        result.error("Err>>:", "fdadfadfsdfasfdas ${e}", null)
+        result.error("Err>>:", " ${e}", null)
       }
     } else if (call.method == "disconnect") {
       try {
@@ -243,7 +266,9 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   }
 
   fun resume(result: Result) {
-    // receiver = WiFiDirectBroadcastReceiver(wifimanager, wifichannel, activity)
+    // Re-registering without unregistering leaks the previous receiver and
+    // delivers every broadcast N times.
+    unregisterReceiverIfRegistered()
     receiver = object : BroadcastReceiver() {
       override fun onReceive(context: Context, intent: Intent) {
         // Log.d(TAG, "FlutterP2pConnection: registered receiver")
@@ -282,6 +307,10 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
                   clients = clients.subSequence(0, clients.length-2).toString()
                 }
                 groupClients = "[${clients}]"
+              } else {
+                // The group is gone; without this the stale client list keeps
+                // the Dart side believing the connection is still alive.
+                groupClients = "[]"
               }
             })
             val networkInfo: NetworkInfo? = intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO)
@@ -304,16 +333,21 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   }
 
   fun pause(result: Result) {
-    context.unregisterReceiver(receiver)
-    //Log.d(TAG, "FlutterP2pConnection: paused wifi p2p connection receiver")
+    unregisterReceiverIfRegistered()
     result.success(true)
   }
 
+  private fun unregisterReceiverIfRegistered() {
+    val currentReceiver = receiver ?: return
+    receiver = null
+    try {
+      context.unregisterReceiver(currentReceiver)
+    } catch (e: IllegalArgumentException) {
+      Log.w(TAG, "FlutterP2pConnection: receiver was not registered: ${e}")
+    }
+  }
+
   fun initializeWifiP2PConnections(result: Result) {
-    intentFilter.addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
-    intentFilter.addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
-    intentFilter.addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
-    intentFilter.addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
     wifimanager = context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
     wifichannel = wifimanager.initialize(context, Looper.getMainLooper(), null)
     result.success(true)
@@ -327,7 +361,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
       }
 
       override fun onFailure(reasonCode: Int) {
-        Log.d(TAG, "FlutterP2pConnection: failed to create group, reasonCode=${reasonCode}")
+        Log.w(TAG, "FlutterP2pConnection: failed to create group, reason=${reasonString(reasonCode)}")
         result.success(false)
       }
     })
@@ -337,11 +371,12 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     wifimanager.removeGroup(wifichannel, object : WifiP2pManager.ActionListener {
       override fun onSuccess() {
         Log.d(TAG, "FlutterP2pConnection: removed wifi p2p group")
+        clearConnectionState()
         result.success(true)
       }
 
       override fun onFailure(reasonCode: Int) {
-        Log.d(TAG, "FlutterP2pConnection: failed to remove group, reasonCode=${reasonCode}")
+        Log.w(TAG, "FlutterP2pConnection: failed to remove group, reason=${reasonString(reasonCode)}")
         result.success(false)
       }
     })
@@ -372,8 +407,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
         result.success(true);
       }
       override fun onFailure(reasonCode: Int) {
-        // TODO: return tha actual reason code
-        Log.d(TAG, "FlutterP2pConnection: discovering wifi p2p devices failed, reasonCode=${reasonCode}")
+        Log.w(TAG, "FlutterP2pConnection: discovering wifi p2p devices failed, reason=${reasonString(reasonCode)}")
         result.success(false);
       }
     })
@@ -386,7 +420,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
         result.success(true);
       }
       override fun onFailure(reasonCode: Int) {
-        Log.d(TAG, "FlutterP2pConnection: failed to stop discovering wifi p2p devices, reasonCode=${reasonCode}")
+        Log.w(TAG, "FlutterP2pConnection: failed to stop discovering wifi p2p devices, reason=${reasonString(reasonCode)}")
         result.success(false);
       }
     })
@@ -411,37 +445,57 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     })
   }
 
+  // Note: onSuccess here only means the framework ACCEPTED the connection
+  // request — the actual connection result arrives asynchronously via
+  // WIFI_P2P_CONNECTION_CHANGED_ACTION (surfaced through the connected-peers
+  // event channel).
   fun connect(result: Result, address: String) {
-    print("avout to call connect");
     val config = WifiP2pConfig()
     config.deviceAddress = address
     config.wps.setup = WpsInfo.PBC
     wifichannel.also { wifichannel: WifiP2pManager.Channel ->
       wifimanager.connect(wifichannel, config, object : WifiP2pManager.ActionListener {
         override fun onSuccess() {
-          Log.d(TAG, "FlutterP2pConnection: connected to wifi p2p device, address=${address}")
+          Log.d(TAG, "FlutterP2pConnection: connection request accepted, address=${address}")
           result.success(true);
         }
         override fun onFailure(reasonCode: Int) {
-          Log.d(TAG, "FlutterP2pConnection: connection to wifi p2p device failed, reasoCode=${reasonCode}")
+          Log.w(TAG, "FlutterP2pConnection: connection request to wifi p2p device failed, reason=${reasonString(reasonCode)}")
           result.success(false);
         }
       })
     }
-    print("afterrrr");
   }
 
   fun disconnect(result: Result) {
-      wifimanager.cancelConnect(wifichannel, object : WifiP2pManager.ActionListener {
-        override fun onSuccess() {
-          Log.d(TAG, "disconnect from wifi p2p connection: true")
-          result.success(true)
-        }
-        override fun onFailure(reasonCode: Int) {
-          Log.d(TAG, "disconnect from wifi p2p connection: false, ${reasonCode}")
-          result.success(false)
-        }
-      })
+    // cancelConnect only aborts an in-progress negotiation; an established
+    // group must be removed explicitly or it lingers and blocks the next
+    // connection attempt with BUSY.
+    wifimanager.cancelConnect(wifichannel, object : WifiP2pManager.ActionListener {
+      override fun onSuccess() {
+        Log.d(TAG, "FlutterP2pConnection: cancelConnect succeeded")
+      }
+      override fun onFailure(reasonCode: Int) {
+        Log.d(TAG, "FlutterP2pConnection: cancelConnect failed, reason=${reasonString(reasonCode)}")
+      }
+    })
+    wifimanager.requestGroupInfo(wifichannel, WifiP2pManager.GroupInfoListener { group: WifiP2pGroup? ->
+      if (group != null) {
+        wifimanager.removeGroup(wifichannel, object : WifiP2pManager.ActionListener {
+          override fun onSuccess() {
+            Log.d(TAG, "FlutterP2pConnection: disconnect removed wifi p2p group")
+            clearConnectionState()
+            result.success(true)
+          }
+          override fun onFailure(reasonCode: Int) {
+            Log.w(TAG, "FlutterP2pConnection: disconnect failed to remove group, reason=${reasonString(reasonCode)}")
+            result.success(false)
+          }
+        })
+      } else {
+        result.success(true)
+      }
+    })
   }
 
   fun fetchPeers(result: Result) {
@@ -449,7 +503,6 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   }
 
   fun peersListener() {
-    print("HELLOFROM: peersListener")
     wifimanager.requestPeers(wifichannel, WifiP2pManager.PeerListListener { peers: WifiP2pDeviceList ->
       var list: MutableList<String> = mutableListOf()
       for (device: WifiP2pDevice in peers.deviceList) {
@@ -457,9 +510,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
         val name = re.replace(device.deviceName, "") // works
         list.add("{\"deviceName\": \"${name}\", \"deviceAddress\": \"${device.deviceAddress}\", \"isGroupOwner\": ${device.isGroupOwner}, \"isServiceDiscoveryCapable\": ${device.isServiceDiscoveryCapable}, \"primaryDeviceType\": \"${device.primaryDeviceType}\", \"secondaryDeviceType\": \"${device.secondaryDeviceType}\", \"status\": ${device.status}}")
       }
-      print("HELLOFROM: I found some peers")
       EfoundPeers = list
-      //Log.d(TAG, list.toString())
     })
   }
 
@@ -469,10 +520,11 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
         wifimanager.removeGroup(wifichannel, object : WifiP2pManager.ActionListener {
           override fun onSuccess() {
             Log.d(TAG, "FlutterP2pConnection: disconnected from all peers")
+            clearConnectionState()
             result.success(true);
           }
           override fun onFailure(reasonCode: Int) {
-            Log.d(TAG, "FlutterP2pConnection: failed to disconnect from all peers, reasonCode=${reasonCode}")
+            Log.w(TAG, "FlutterP2pConnection: failed to disconnect from all peers, reason=${reasonString(reasonCode)}")
             result.success(false);
           }
         })
@@ -486,9 +538,10 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   val FoundPeersHandler = object : EventChannel.StreamHandler {
     private var handler: Handler = Handler(Looper.getMainLooper())
     private var eventSink: EventChannel.EventSink? = null
+    private var runnable: Runnable? = null
 
-    @SuppressLint("SimpleDateFormat")
     override fun onListen(p0: Any?, sink: EventChannel.EventSink) {
+      runnable?.let { handler.removeCallbacks(it) }
       eventSink = sink
       var peers: String = ""
       val r: Runnable = object : Runnable {
@@ -502,9 +555,14 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
           handler.postDelayed(this, 1000)
         }
       }
+      runnable = r
       handler.postDelayed(r, 1000)
     }
     override fun onCancel(p0: Any?) {
+      // Without removeCallbacks the old loop keeps running and double-emits
+      // into whatever sink the next onListen installs.
+      runnable?.let { handler.removeCallbacks(it) }
+      runnable = null
       eventSink = null
     }
   }
@@ -512,9 +570,10 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   val ConnectedPeersHandler = object : EventChannel.StreamHandler {
     private var handler: Handler = Handler(Looper.getMainLooper())
     private var eventSink: EventChannel.EventSink? = null
+    private var runnable: Runnable? = null
 
-    @SuppressLint("SimpleDateFormat")
     override fun onListen(p0: Any?, sink: EventChannel.EventSink) {
+      runnable?.let { handler.removeCallbacks(it) }
       eventSink = sink
       var networkinfo: NetworkInfo? = null
       var wifip2pinfo: WifiP2pInfo? = null
@@ -524,28 +583,28 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
             val ni: NetworkInfo? = EnetworkInfo
             val wi: WifiP2pInfo? = EwifiP2pInfo
             if (ni != null && wi != null) {
-              if (networkinfo != ni && wifip2pinfo != wi) {
+              if (networkinfo != ni || wifip2pinfo != wi) {
                 networkinfo = ni
                 wifip2pinfo = wi
-                print("{\"isConnected\": ${ni.isConnected}, \"isGroupOwner\": ${wi.isGroupOwner}, \"groupOwnerAddress\": \"${wi.groupOwnerAddress}\", \"groupFormed\": ${wi.groupFormed}, \"clients\": ${groupClients}}");
                 eventSink?.success("{\"isConnected\": ${ni.isConnected}, \"isGroupOwner\": ${wi.isGroupOwner}, \"groupOwnerAddress\": \"${wi.groupOwnerAddress}\", \"groupFormed\": ${wi.groupFormed}, \"clients\": ${groupClients}}")
-                //if (ni.isConnected == true && wi.groupFormed == true) {
-                //  eventSink?.success("{\"isConnected\": ${ni.isConnected}, \"isGroupOwner\": ${wi.isGroupOwner}, \"groupOwnerAddress\": \"${wi.groupOwnerAddress}\", \"groupFormed\": ${wi.groupFormed}, \"clients\": ${groupClients}}")
-                //} else {
-                //  eventSink?.success("null")
-                //}
               }
-            } 
-            //else {
-            //    eventSink?.success("null")
-            //}
+            } else if (networkinfo != null || wifip2pinfo != null) {
+              // The group died and the cached state was cleared: tell the Dart
+              // side once (it maps "null" to a disconnected WifiP2PInfo).
+              networkinfo = null
+              wifip2pinfo = null
+              eventSink?.success("null")
+            }
           }
           handler.postDelayed(this, 1000)
         }
       }
+      runnable = r
       handler.postDelayed(r, 1000)
     }
     override fun onCancel(p0: Any?) {
+      runnable?.let { handler.removeCallbacks(it) }
+      runnable = null
       eventSink = null
     }
   }
