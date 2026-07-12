@@ -588,10 +588,19 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
       handler.post { emitIfChanged() }
     }
 
+    private fun currentPayload(): String {
+      val ni: NetworkInfo? = EnetworkInfo
+      val wi: WifiP2pInfo? = EwifiP2pInfo
+      return if (ni != null && wi != null) {
+        "{\"isConnected\": ${ni.isConnected}, \"isGroupOwner\": ${wi.isGroupOwner}, \"groupOwnerAddress\": \"${wi.groupOwnerAddress}\", \"groupFormed\": ${wi.groupFormed}, \"clients\": ${groupClients}}"
+      } else {
+        "null"
+      }
+    }
+
     // Main-looper only (reached via handler.post / postDelayed).
     private fun emitIfChanged() {
       val ni: NetworkInfo? = EnetworkInfo
-      val wi: WifiP2pInfo? = EwifiP2pInfo
       // While connected, keep the client list fresh: it is fetched
       // asynchronously and the join of a client does not always fire
       // another CONNECTION_CHANGED broadcast. The group owner's
@@ -604,11 +613,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
       // Compare the full payload rather than the info objects, so a
       // late-arriving client list still gets emitted. "null" (group
       // death) also falls out of this comparison, emitted exactly once.
-      val payload: String = if (ni != null && wi != null) {
-        "{\"isConnected\": ${ni.isConnected}, \"isGroupOwner\": ${wi.isGroupOwner}, \"groupOwnerAddress\": \"${wi.groupOwnerAddress}\", \"groupFormed\": ${wi.groupFormed}, \"clients\": ${groupClients}}"
-      } else {
-        "null"
-      }
+      val payload: String = currentPayload()
       if (payload != lastEmitted) {
         lastEmitted = payload
         eventSink?.success(payload)
@@ -618,7 +623,12 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     override fun onListen(p0: Any?, sink: EventChannel.EventSink) {
       runnable?.let { handler.removeCallbacks(it) }
       eventSink = sink
-      lastEmitted = null
+      // Seed the dedupe with the CURRENT state instead of replaying it: a
+      // fresh subscriber (every visit to the discovery screen) must not be
+      // handed the stale connected-state of a session that just ended —
+      // that ghost event kicked off a channel establishment against a dead
+      // group. Subscribers only hear changes from this point on.
+      lastEmitted = currentPayload()
       val r: Runnable = object : Runnable {
         override fun run() {
           emitIfChanged()
