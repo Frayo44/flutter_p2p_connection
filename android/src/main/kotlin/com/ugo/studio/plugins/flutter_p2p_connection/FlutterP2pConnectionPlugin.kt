@@ -321,6 +321,9 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
               EnetworkInfo = networkInfo
               EwifiP2pInfo = wifiP2pInfo
               Log.d(TAG, "FlutterP2pConnection: connectionInfo={connected: ${networkInfo.isConnected}, isGroupOwner: ${wifiP2pInfo.isGroupOwner}, groupOwnerAddress: ${wifiP2pInfo.groupOwnerAddress}, groupFormed: ${wifiP2pInfo.groupFormed}, clients: ${groupClients}}")
+              // Deliver the change to Dart now; the poll loop alone adds up
+              // to a second of latency to every connect/disconnect.
+              ConnectedPeersHandler.emitNow()
             }
           }
           WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
@@ -569,42 +572,56 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     }
   }
 
-  val ConnectedPeersHandler = object : EventChannel.StreamHandler {
+  val ConnectedPeersHandler = ConnectedPeersStreamHandler()
+
+  inner class ConnectedPeersStreamHandler : EventChannel.StreamHandler {
     private var handler: Handler = Handler(Looper.getMainLooper())
     private var eventSink: EventChannel.EventSink? = null
     private var runnable: Runnable? = null
+    private var lastEmitted: String? = null
+
+    // Push an event immediately instead of waiting for the next poll tick.
+    // Called from the CONNECTION_CHANGED receiver: the poll added up to 1s
+    // of latency on each phone before the Dart side learned the group
+    // formed, and the connect flow pays that twice (once per side).
+    fun emitNow() {
+      handler.post { emitIfChanged() }
+    }
+
+    // Main-looper only (reached via handler.post / postDelayed).
+    private fun emitIfChanged() {
+      val ni: NetworkInfo? = EnetworkInfo
+      val wi: WifiP2pInfo? = EwifiP2pInfo
+      // While connected, keep the client list fresh: it is fetched
+      // asynchronously and the join of a client does not always fire
+      // another CONNECTION_CHANGED broadcast. The group owner's
+      // Dart-side isConnected depends on this list being non-empty.
+      if (ni != null && ni.isConnected && this@FlutterP2pConnectionPlugin::wifimanager.isInitialized) {
+        wifimanager.requestGroupInfo(wifichannel, WifiP2pManager.GroupInfoListener { group: WifiP2pGroup? ->
+          groupClients = clientsJson(group)
+        })
+      }
+      // Compare the full payload rather than the info objects, so a
+      // late-arriving client list still gets emitted. "null" (group
+      // death) also falls out of this comparison, emitted exactly once.
+      val payload: String = if (ni != null && wi != null) {
+        "{\"isConnected\": ${ni.isConnected}, \"isGroupOwner\": ${wi.isGroupOwner}, \"groupOwnerAddress\": \"${wi.groupOwnerAddress}\", \"groupFormed\": ${wi.groupFormed}, \"clients\": ${groupClients}}"
+      } else {
+        "null"
+      }
+      if (payload != lastEmitted) {
+        lastEmitted = payload
+        eventSink?.success(payload)
+      }
+    }
 
     override fun onListen(p0: Any?, sink: EventChannel.EventSink) {
       runnable?.let { handler.removeCallbacks(it) }
       eventSink = sink
-      var lastEmitted: String? = null
+      lastEmitted = null
       val r: Runnable = object : Runnable {
         override fun run() {
-          handler.post {
-            val ni: NetworkInfo? = EnetworkInfo
-            val wi: WifiP2pInfo? = EwifiP2pInfo
-            // While connected, keep the client list fresh: it is fetched
-            // asynchronously and the join of a client does not always fire
-            // another CONNECTION_CHANGED broadcast. The group owner's
-            // Dart-side isConnected depends on this list being non-empty.
-            if (ni != null && ni.isConnected && this@FlutterP2pConnectionPlugin::wifimanager.isInitialized) {
-              wifimanager.requestGroupInfo(wifichannel, WifiP2pManager.GroupInfoListener { group: WifiP2pGroup? ->
-                groupClients = clientsJson(group)
-              })
-            }
-            // Compare the full payload rather than the info objects, so a
-            // late-arriving client list still gets emitted. "null" (group
-            // death) also falls out of this comparison, emitted exactly once.
-            val payload: String = if (ni != null && wi != null) {
-              "{\"isConnected\": ${ni.isConnected}, \"isGroupOwner\": ${wi.isGroupOwner}, \"groupOwnerAddress\": \"${wi.groupOwnerAddress}\", \"groupFormed\": ${wi.groupFormed}, \"clients\": ${groupClients}}"
-            } else {
-              "null"
-            }
-            if (payload != lastEmitted) {
-              lastEmitted = payload
-              eventSink?.success(payload)
-            }
-          }
+          emitIfChanged()
           handler.postDelayed(this, 1000)
         }
       }
