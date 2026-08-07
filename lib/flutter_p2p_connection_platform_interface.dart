@@ -48,6 +48,18 @@ abstract class FlutterP2pConnectionPlatform extends PlatformInterface {
     throw UnimplementedError('connect() has not been implemented.');
   }
 
+  Future<String?> connectWithReason(String address) {
+    throw UnimplementedError('connectWithReason() has not been implemented.');
+  }
+
+  Future<String?> discoverWithReason() {
+    throw UnimplementedError('discoverWithReason() has not been implemented.');
+  }
+
+  Future<bool?> cancelConnect() {
+    throw UnimplementedError('cancelConnect() has not been implemented.');
+  }
+
   Future<bool?> disconnect() {
     throw UnimplementedError('disconnect() has not been implemented.');
   }

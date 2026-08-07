@@ -52,6 +52,24 @@ class MethodChannelFlutterP2pConnection extends FlutterP2pConnectionPlatform {
   }
 
   @override
+  Future<String?> connectWithReason(String address) async {
+    final arg = {
+      "address": address,
+    };
+    return await methodChannel.invokeMethod<String?>("connectWithReason", arg);
+  }
+
+  @override
+  Future<String?> discoverWithReason() async {
+    return await methodChannel.invokeMethod<String?>("discoverWithReason");
+  }
+
+  @override
+  Future<bool?> cancelConnect() async {
+    return await methodChannel.invokeMethod<bool?>("cancelConnect");
+  }
+
+  @override
   Future<bool?> disconnect() async {
     final disconnected = await methodChannel.invokeMethod<bool?>("disconnect");
     return disconnected;

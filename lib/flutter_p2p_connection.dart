@@ -108,6 +108,51 @@ class FlutterP2pConnection {
     await FlutterP2pConnectionPlatform.instance.requestPeers();
   }
 
+  /// Like [connect] but returns WHY a request was rejected: "OK" on accept,
+  /// else the framework reason ("BUSY", "ERROR", "P2P_UNSUPPORTED",
+  /// "NO_SERVICE_REQUESTS", "UNKNOWN(n)"). BUSY is remediable (remove a
+  /// lingering group and retry); a bare bool hid that.
+  Future<String> connectWithReason(String address) async {
+    return (await FlutterP2pConnectionPlatform.instance
+            .connectWithReason(address)) ??
+        "ERROR";
+  }
+
+  /// Like [discover] but returns "OK" or the rejection reason string.
+  Future<String> discoverWithReason() async {
+    return (await FlutterP2pConnectionPlatform.instance.discoverWithReason()) ??
+        "ERROR";
+  }
+
+  /// Aborts a pending (pre-group) connect invitation without the group
+  /// teardown round-trip of [disconnect] - the fast path for a user cancel.
+  Future<bool> cancelConnect() async {
+    return (await FlutterP2pConnectionPlatform.instance.cancelConnect()) ==
+        true;
+  }
+
+  /// This device's own WifiP2pDevice status pushed from
+  /// THIS_DEVICE_CHANGED broadcasts (no polling). Status ints follow
+  /// WifiP2pDevice: 0=CONNECTED 1=INVITED 2=FAILED 3=AVAILABLE
+  /// 4=UNAVAILABLE. The INVITED -> AVAILABLE/FAILED transition without a
+  /// formed group is the fastest available "peer declined/ignored" signal.
+  Stream<SelfP2pDevice> streamSelfDeviceStatus() {
+    const selfChannel =
+        EventChannel("flutter_p2p_connection_selfDeviceStatus");
+    return selfChannel.receiveBroadcastStream().map((payload) {
+      Map<String, dynamic>? json = jsonDecode(payload);
+      if (json == null) {
+        return const SelfP2pDevice(
+            deviceName: "", deviceAddress: "", status: -1);
+      }
+      return SelfP2pDevice(
+        deviceName: json["deviceName"] ?? "",
+        deviceAddress: json["deviceAddress"] ?? "",
+        status: json["status"] ?? -1,
+      );
+    });
+  }
+
   Future<List<DiscoveredPeers>> fetchPeers() async {
     List<String>? list =
         await FlutterP2pConnectionPlatform.instance.fetchPeers();
@@ -204,6 +249,7 @@ class FlutterP2pConnection {
               : json["groupOwnerAddress"],
           groupFormed: json["groupFormed"],
           clients: clients,
+          detailedState: json["detailedState"],
         );
       } else {
         return const WifiP2PInfo(
@@ -1103,12 +1149,32 @@ class WifiP2PInfo {
   final String groupOwnerAddress;
   final bool groupFormed;
   final List<Client> clients;
+
+  /// NetworkInfo.detailedState from the CONNECTION_CHANGED broadcast (e.g.
+  /// "CONNECTED", "DISCONNECTED", "FAILED"). Null on payloads from plugin
+  /// versions that predate the field.
+  final String? detailedState;
+
   const WifiP2PInfo({
     required this.isConnected,
     required this.isGroupOwner,
     required this.groupOwnerAddress,
     required this.groupFormed,
     required this.clients,
+    this.detailedState,
+  });
+}
+
+/// This device's own WifiP2pDevice snapshot from THIS_DEVICE_CHANGED.
+class SelfP2pDevice {
+  final String deviceName;
+  final String deviceAddress;
+  final int status;
+
+  const SelfP2pDevice({
+    required this.deviceName,
+    required this.deviceAddress,
+    required this.status,
   });
 }
 
