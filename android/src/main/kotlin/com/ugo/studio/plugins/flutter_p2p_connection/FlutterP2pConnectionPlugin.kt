@@ -396,6 +396,60 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   }
 
   fun createGroup(result: Result) {
+    // Autonomous group for the cross-platform (QR) host flow: place the
+    // group on the band OPPOSITE the phone's current WiFi connection.
+    // Same-band STA+GO forces the single radio to time-slice between two
+    // channels (MCC), which collapses the frame stream to ~1fps; opposite
+    // bands run concurrently on modern chips (DBS). Every failure path
+    // falls back to the legacy no-config call, so the worst case is
+    // exactly the old behavior. Negotiated groups (connect()) - the normal
+    // Android<->Android pairing path - do not go through here at all.
+    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
+      return createGroupLegacy(result)
+    }
+    try {
+      val wm = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
+      @Suppress("DEPRECATION")
+      val staFreq = wm.connectionInfo?.frequency ?: -1
+      val band = when {
+        staFreq in 2400..2500 -> WifiP2pConfig.GROUP_OWNER_BAND_5GHZ
+        staFreq >= 4900 -> WifiP2pConfig.GROUP_OWNER_BAND_2GHZ
+        else -> WifiP2pConfig.GROUP_OWNER_BAND_5GHZ // no STA: prefer 5GHz
+      }
+      if (band == WifiP2pConfig.GROUP_OWNER_BAND_5GHZ && !wm.is5GHzBandSupported) {
+        // 2.4GHz-only chip: forcing bands cannot help; keep old behavior.
+        return createGroupLegacy(result)
+      }
+      // A banded config legally requires our own credentials (build() throws
+      // on a band-only config). Same rotation semantics as the framework's
+      // random temporary groups; groupInfo() reports them as usual.
+      val alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+      val rng = java.security.SecureRandom()
+      fun randomToken(length: Int): String =
+        (1..length).map { alphabet[rng.nextInt(alphabet.length)] }.joinToString("")
+      val config = WifiP2pConfig.Builder()
+        .setNetworkName("DIRECT-sc-" + randomToken(4))
+        .setPassphrase(randomToken(12))
+        .setGroupOperatingBand(band)
+        .build()
+      wifimanager.createGroup(wifichannel, config, object : WifiP2pManager.ActionListener {
+        override fun onSuccess() {
+          Log.d(TAG, "FlutterP2pConnection: Created wifi p2p group (band=$band, staFreq=$staFreq)")
+          result.success(true)
+        }
+
+        override fun onFailure(reasonCode: Int) {
+          Log.w(TAG, "FlutterP2pConnection: banded createGroup failed (${reasonString(reasonCode)}), falling back to legacy")
+          createGroupLegacy(result)
+        }
+      })
+    } catch (e: Exception) {
+      Log.w(TAG, "FlutterP2pConnection: banded createGroup threw ($e), falling back to legacy")
+      createGroupLegacy(result)
+    }
+  }
+
+  fun createGroupLegacy(result: Result) {
     wifimanager.createGroup(wifichannel, object : WifiP2pManager.ActionListener {
       override fun onSuccess() {
         Log.d(TAG, "FlutterP2pConnection: Created wifi p2p group")
