@@ -15,6 +15,8 @@ import android.net.NetworkInfo
 import android.net.wifi.WifiManager
 import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.*
+import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
+import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -29,6 +31,7 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel.Result
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.HashMap
 import java.util.*
@@ -52,8 +55,20 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   var EwifiP2pInfo: WifiP2pInfo? = null
   private lateinit var CConnectedPeers: EventChannel
   private lateinit var CselfDevice: EventChannel
+  private lateinit var CserviceNames: EventChannel
   private lateinit var CdiscoveryState: EventChannel
   var groupClients: String = "[]"
+
+  // Friendly names over DNS-SD service discovery. The Wi-Fi Direct device
+  // name itself can only be changed by system apps, so each phone announces
+  // the name it wants to be shown under as a TXT record of a local service,
+  // and reads the other phones' records. Keyed by the P2P device address,
+  // which is what the peer list reports too.
+  private val friendlyServiceType = "_saycheese._tcp"
+  private val friendlyInstanceName = "SayCheese"
+  private var friendlyServiceRequest: WifiP2pDnsSdServiceRequest? = null
+  private var friendlyListenersSet = false
+  private val friendlyNames = HashMap<String, String>()
 
   override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
     context = flutterPluginBinding.applicationContext
@@ -65,6 +80,8 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     CConnectedPeers.setStreamHandler(ConnectedPeersHandler)
     CselfDevice = EventChannel(flutterPluginBinding.binaryMessenger, "flutter_p2p_connection_selfDeviceStatus")
     CselfDevice.setStreamHandler(SelfDeviceHandler)
+    CserviceNames = EventChannel(flutterPluginBinding.binaryMessenger, "flutter_p2p_connection_serviceNames")
+    CserviceNames.setStreamHandler(ServiceNamesHandler)
     CdiscoveryState = EventChannel(flutterPluginBinding.binaryMessenger, "flutter_p2p_connection_discoveryState")
     CdiscoveryState.setStreamHandler(DiscoveryStateHandler)
     // Set up the intent filter here (not in initialize()) so a resume() that
@@ -201,6 +218,31 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     } else if (call.method == "deviceInfo") {
       try {
         requestDeviceName(result)
+      } catch (e: Exception) {
+        result.error("Err>>:", " ${e}", null)
+      }
+    } else if (call.method == "advertiseName") {
+      try {
+        val name: String = call.argument("name") ?: ""
+        advertiseName(result, name)
+      } catch (e: Exception) {
+        result.error("Err>>:", " ${e}", null)
+      }
+    } else if (call.method == "clearAdvertisedName") {
+      try {
+        clearAdvertisedName(result)
+      } catch (e: Exception) {
+        result.error("Err>>:", " ${e}", null)
+      }
+    } else if (call.method == "discoverServiceNames") {
+      try {
+        discoverServiceNames(result)
+      } catch (e: Exception) {
+        result.error("Err>>:", " ${e}", null)
+      }
+    } else if (call.method == "stopServiceNameDiscovery") {
+      try {
+        stopServiceNameDiscovery(result)
       } catch (e: Exception) {
         result.error("Err>>:", " ${e}", null)
       }
@@ -406,7 +448,133 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   fun initializeWifiP2PConnections(result: Result) {
     wifimanager = context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
     wifichannel = wifimanager.initialize(context, Looper.getMainLooper(), null)
+    // Service requests and DNS-SD listeners belong to the channel; a fresh
+    // channel starts with neither.
+    friendlyServiceRequest = null
+    friendlyListenersSet = false
     result.success(true)
+  }
+
+  // Replaces this phone's announced name (an empty name only clears it).
+  fun advertiseName(result: Result, name: String) {
+    wifimanager.clearLocalServices(wifichannel, object : WifiP2pManager.ActionListener {
+      override fun onSuccess() { addFriendlyService(result, name) }
+      override fun onFailure(reasonCode: Int) {
+        Log.w(TAG, "FlutterP2pConnection: clearLocalServices failed, reason=${reasonString(reasonCode)}")
+        addFriendlyService(result, name)
+      }
+    })
+  }
+
+  private fun addFriendlyService(result: Result, name: String) {
+    if (name.isBlank()) {
+      result.success("OK")
+      return
+    }
+    val record = mapOf("n" to name, "v" to "1")
+    val info = WifiP2pDnsSdServiceInfo.newInstance(friendlyInstanceName, friendlyServiceType, record)
+    wifimanager.addLocalService(wifichannel, info, object : WifiP2pManager.ActionListener {
+      override fun onSuccess() {
+        Log.d(TAG, "FlutterP2pConnection: advertising friendly name")
+        result.success("OK")
+      }
+      override fun onFailure(reasonCode: Int) {
+        Log.w(TAG, "FlutterP2pConnection: addLocalService failed, reason=${reasonString(reasonCode)}")
+        result.success(reasonString(reasonCode))
+      }
+    })
+  }
+
+  fun clearAdvertisedName(result: Result) {
+    // The name query belongs to this channel as well, and initialize()
+    // opens a fresh channel without closing this one: drop the query here
+    // or every re-initialize leaves one more copy running.
+    withdrawNameQuery(null)
+    wifimanager.clearLocalServices(wifichannel, object : WifiP2pManager.ActionListener {
+      override fun onSuccess() { result.success(true) }
+      override fun onFailure(reasonCode: Int) { result.success(false) }
+    })
+  }
+
+  // While the name query is registered, the framework re-sends it on every
+  // find (plain discoverPeers too) and supplicant keeps querying peers that
+  // never answer (TVs), which keeps the radio off the listen channel.
+  fun stopServiceNameDiscovery(result: Result) {
+    withdrawNameQuery(result)
+  }
+
+  private fun withdrawNameQuery(result: Result?) {
+    if (friendlyServiceRequest == null) {
+      result?.success(true)
+      return
+    }
+    friendlyServiceRequest = null
+    wifimanager.clearServiceRequests(wifichannel, object : WifiP2pManager.ActionListener {
+      override fun onSuccess() { result?.success(true) }
+      override fun onFailure(reasonCode: Int) {
+        Log.d(TAG, "FlutterP2pConnection: clearServiceRequests failed, reason=${reasonString(reasonCode)}")
+        result?.success(false)
+      }
+    })
+  }
+
+  // One round of service discovery for the other phones' announced names.
+  // Results arrive on the serviceNames event channel, possibly much later
+  // and possibly never (some chips answer service queries unreliably);
+  // callers keep showing the plain device name until one lands.
+  fun discoverServiceNames(result: Result) {
+    if (!friendlyListenersSet) {
+      wifimanager.setDnsSdResponseListeners(
+        wifichannel,
+        { _: String?, _: String?, _: WifiP2pDevice? -> },
+        { fullDomainName: String?, record: MutableMap<String, String>?, device: WifiP2pDevice? ->
+          val name = record?.get("n")?.trim()
+          if (device != null && !name.isNullOrEmpty() &&
+            (fullDomainName?.lowercase()?.contains(friendlyServiceType) == true)) {
+            if (friendlyNames[device.deviceAddress] != name) {
+              friendlyNames[device.deviceAddress] = name
+              Log.d(TAG, "FlutterP2pConnection: announced name from ${device.deviceAddress}")
+              ServiceNamesHandler.emit()
+            }
+          }
+        })
+      friendlyListenersSet = true
+    }
+    val discover = {
+      wifimanager.discoverServices(wifichannel, object : WifiP2pManager.ActionListener {
+        override fun onSuccess() { result.success("OK") }
+        override fun onFailure(reasonCode: Int) {
+          if (reasonCode == WifiP2pManager.NO_SERVICE_REQUESTS) friendlyServiceRequest = null
+          Log.d(TAG, "FlutterP2pConnection: discoverServices failed, reason=${reasonString(reasonCode)}")
+          result.success(reasonString(reasonCode))
+        }
+      })
+    }
+    if (friendlyServiceRequest != null) {
+      discover()
+      return
+    }
+    // A query registered anew starts with no answers, so the names stream
+    // lists exactly the phones that answered this query (callers keep the
+    // names they learned before).
+    if (friendlyNames.isNotEmpty()) {
+      friendlyNames.clear()
+      ServiceNamesHandler.emit()
+    }
+    // A TXT query for the exact instance: the one-argument newInstance(type)
+    // is a PTR query, whose answers only reach the PTR listener and never
+    // carry the name.
+    val request = WifiP2pDnsSdServiceRequest.newInstance(friendlyInstanceName, friendlyServiceType)
+    wifimanager.addServiceRequest(wifichannel, request, object : WifiP2pManager.ActionListener {
+      override fun onSuccess() {
+        friendlyServiceRequest = request
+        discover()
+      }
+      override fun onFailure(reasonCode: Int) {
+        Log.d(TAG, "FlutterP2pConnection: addServiceRequest failed, reason=${reasonString(reasonCode)}")
+        result.success(reasonString(reasonCode))
+      }
+    })
   }
 
   fun createGroup(result: Result) {
@@ -751,6 +919,27 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
 
   val ConnectedPeersHandler = ConnectedPeersStreamHandler()
 
+  // Push-only map of P2P device address -> announced friendly name, as JSON.
+  val ServiceNamesHandler = ServiceNamesStreamHandler()
+
+  inner class ServiceNamesStreamHandler : EventChannel.StreamHandler {
+    private var handler: Handler = Handler(Looper.getMainLooper())
+    private var eventSink: EventChannel.EventSink? = null
+
+    fun emit() {
+      handler.post { eventSink?.success(JSONObject(friendlyNames as Map<*, *>).toString()) }
+    }
+
+    override fun onListen(p0: Any?, sink: EventChannel.EventSink) {
+      eventSink = sink
+      emit()
+    }
+
+    override fun onCancel(p0: Any?) {
+      eventSink = null
+    }
+  }
+
   // Push-only stream of this device's own WifiP2pDevice status (from
   // THIS_DEVICE_CHANGED broadcasts) - no polling; events only exist when the
   // framework says something changed.
@@ -870,6 +1059,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     CfoundPeers.setStreamHandler(null)
     CConnectedPeers.setStreamHandler(null)
     CselfDevice.setStreamHandler(null)
+    CserviceNames.setStreamHandler(null)
     CdiscoveryState.setStreamHandler(null)
   }
 

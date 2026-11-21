@@ -131,6 +131,58 @@ class FlutterP2pConnection {
         true;
   }
 
+  /// Announces [name] as this phone's friendly name to other phones running
+  /// [discoverServiceNames] (a DNS-SD TXT record of a local Wi-Fi Direct
+  /// service). Replaces any earlier name; an empty name just clears it.
+  /// Returns "OK" or the framework's rejection reason.
+  Future<String> advertiseName(String name) async {
+    return (await FlutterP2pConnectionPlatform.instance.advertiseName(name)) ??
+        "ERROR";
+  }
+
+  /// Stops announcing a friendly name.
+  Future<bool> clearAdvertisedName() async {
+    return (await FlutterP2pConnectionPlatform.instance
+            .clearAdvertisedName()) ==
+        true;
+  }
+
+  /// Runs one round of service discovery for other phones' friendly names;
+  /// results arrive on [streamServiceNames]. Like discover(), issuing this
+  /// during a connect negotiation can cancel it. Returns "OK" or the
+  /// framework's rejection reason.
+  Future<String> discoverServiceNames() async {
+    return (await FlutterP2pConnectionPlatform.instance
+            .discoverServiceNames()) ??
+        "ERROR";
+  }
+
+  /// Withdraws the name query that [discoverServiceNames] registered. While
+  /// it is registered, every discovery round (discover() included) also
+  /// queries nearby devices for it, which keeps the radio busy; withdraw it
+  /// once the names are known.
+  Future<bool> stopServiceNameDiscovery() async {
+    return (await FlutterP2pConnectionPlatform.instance
+            .stopServiceNameDiscovery()) ==
+        true;
+  }
+
+  /// P2P device address -> friendly name announced by that phone, for the
+  /// phones that answered the current name query (a query registered again
+  /// after [stopServiceNameDiscovery] starts empty). Emits the whole map on
+  /// listen and whenever a name is learned or changes.
+  Stream<Map<String, String>> streamServiceNames() {
+    const namesChannel = EventChannel("flutter_p2p_connection_serviceNames");
+    return namesChannel.receiveBroadcastStream().map((payload) {
+      final decoded = payload is String ? jsonDecode(payload) : null;
+      if (decoded is! Map) return const <String, String>{};
+      return {
+        for (final e in decoded.entries)
+          if (e.value is String) e.key.toString(): e.value as String,
+      };
+    });
+  }
+
   /// This device's own WifiP2pDevice status pushed from
   /// THIS_DEVICE_CHANGED broadcasts (no polling). Status ints follow
   /// WifiP2pDevice: 0=CONNECTED 1=INVITED 2=FAILED 3=AVAILABLE
