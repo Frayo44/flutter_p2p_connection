@@ -205,6 +205,18 @@ class FlutterP2pConnection {
     });
   }
 
+  /// Peer discovery starting (true) or stopping (false), pushed from
+  /// WIFI_P2P_DISCOVERY_CHANGED broadcasts. Besides this app's own
+  /// discover/stop/connect calls, Android stops discovery when another
+  /// phone's invitation or negotiation request arrives, which is the only
+  /// hint the receiving phone gets that a connection is starting.
+  Stream<bool> streamDiscoveryState() {
+    const stateChannel = EventChannel("flutter_p2p_connection_discoveryState");
+    return stateChannel
+        .receiveBroadcastStream()
+        .map((payload) => payload == true);
+  }
+
   Future<List<DiscoveredPeers>> fetchPeers() async {
     List<String>? list =
         await FlutterP2pConnectionPlatform.instance.fetchPeers();

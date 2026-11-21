@@ -56,6 +56,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   private lateinit var CConnectedPeers: EventChannel
   private lateinit var CselfDevice: EventChannel
   private lateinit var CserviceNames: EventChannel
+  private lateinit var CdiscoveryState: EventChannel
   var groupClients: String = "[]"
 
   // Friendly names over DNS-SD service discovery. The Wi-Fi Direct device
@@ -81,6 +82,8 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     CselfDevice.setStreamHandler(SelfDeviceHandler)
     CserviceNames = EventChannel(flutterPluginBinding.binaryMessenger, "flutter_p2p_connection_serviceNames")
     CserviceNames.setStreamHandler(ServiceNamesHandler)
+    CdiscoveryState = EventChannel(flutterPluginBinding.binaryMessenger, "flutter_p2p_connection_discoveryState")
+    CdiscoveryState.setStreamHandler(DiscoveryStateHandler)
     // Set up the intent filter here (not in initialize()) so a resume() that
     // arrives before initialize() still registers a receiver that hears events,
     // and repeated initialize() calls don't accumulate duplicate actions.
@@ -89,6 +92,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
       intentFilter.addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
       intentFilter.addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
       intentFilter.addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
+      intentFilter.addAction(WifiP2pManager.WIFI_P2P_DISCOVERY_CHANGED_ACTION)
     }
   }
 
@@ -407,6 +411,16 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
               Log.d(TAG, "FlutterP2pConnection: thisDevice status=${device.status}")
               SelfDeviceHandler.emit("{\"deviceName\": \"${name}\", \"deviceAddress\": \"${device.deviceAddress}\", \"status\": ${device.status}}")
             }
+          }
+          WifiP2pManager.WIFI_P2P_DISCOVERY_CHANGED_ACTION -> {
+            // Peer discovery (p2p_find) started or stopped. Besides our own
+            // discover/stop/connect calls, the framework stops it when a
+            // peer's invitation or negotiation request arrives - the only
+            // signal the receiving phone gets that something is starting.
+            val state = intent.getIntExtra(WifiP2pManager.EXTRA_DISCOVERY_STATE, -1)
+            val running = state == WifiP2pManager.WIFI_P2P_DISCOVERY_STARTED
+            Log.d(TAG, "FlutterP2pConnection: discovery running=${running}")
+            DiscoveryStateHandler.emit(running)
           }
         }
       }
@@ -930,6 +944,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   // THIS_DEVICE_CHANGED broadcasts) - no polling; events only exist when the
   // framework says something changed.
   val SelfDeviceHandler = SelfDeviceStreamHandler()
+  val DiscoveryStateHandler = DiscoveryStateStreamHandler()
 
   inner class SelfDeviceStreamHandler : EventChannel.StreamHandler {
     private var handler: Handler = Handler(Looper.getMainLooper())
@@ -937,6 +952,24 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
 
     fun emit(payload: String) {
       handler.post { eventSink?.success(payload) }
+    }
+
+    override fun onListen(p0: Any?, sink: EventChannel.EventSink) {
+      eventSink = sink
+    }
+
+    override fun onCancel(p0: Any?) {
+      eventSink = null
+    }
+  }
+
+  // Push-only: true when peer discovery starts, false when it stops.
+  inner class DiscoveryStateStreamHandler : EventChannel.StreamHandler {
+    private var handler: Handler = Handler(Looper.getMainLooper())
+    private var eventSink: EventChannel.EventSink? = null
+
+    fun emit(running: Boolean) {
+      handler.post { eventSink?.success(running) }
     }
 
     override fun onListen(p0: Any?, sink: EventChannel.EventSink) {
@@ -1027,6 +1060,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     CConnectedPeers.setStreamHandler(null)
     CselfDevice.setStreamHandler(null)
     CserviceNames.setStreamHandler(null)
+    CdiscoveryState.setStreamHandler(null)
   }
 
    override fun onDetachedFromActivity() {
