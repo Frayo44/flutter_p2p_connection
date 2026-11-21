@@ -236,6 +236,12 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
       } catch (e: Exception) {
         result.error("Err>>:", " ${e}", null)
       }
+    } else if (call.method == "stopServiceNameDiscovery") {
+      try {
+        stopServiceNameDiscovery(result)
+      } catch (e: Exception) {
+        result.error("Err>>:", " ${e}", null)
+      }
     } else if (call.method == "fetchPeers") {
       try {
         fetchPeers(result)
@@ -469,13 +475,32 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     // The name query belongs to this channel as well, and initialize()
     // opens a fresh channel without closing this one: drop the query here
     // or every re-initialize leaves one more copy running.
-    if (friendlyServiceRequest != null) {
-      wifimanager.clearServiceRequests(wifichannel, null)
-      friendlyServiceRequest = null
-    }
+    withdrawNameQuery(null)
     wifimanager.clearLocalServices(wifichannel, object : WifiP2pManager.ActionListener {
       override fun onSuccess() { result.success(true) }
       override fun onFailure(reasonCode: Int) { result.success(false) }
+    })
+  }
+
+  // While the name query is registered, the framework re-sends it on every
+  // find (plain discoverPeers too) and supplicant keeps querying peers that
+  // never answer (TVs), which keeps the radio off the listen channel.
+  fun stopServiceNameDiscovery(result: Result) {
+    withdrawNameQuery(result)
+  }
+
+  private fun withdrawNameQuery(result: Result?) {
+    if (friendlyServiceRequest == null) {
+      result?.success(true)
+      return
+    }
+    friendlyServiceRequest = null
+    wifimanager.clearServiceRequests(wifichannel, object : WifiP2pManager.ActionListener {
+      override fun onSuccess() { result?.success(true) }
+      override fun onFailure(reasonCode: Int) {
+        Log.d(TAG, "FlutterP2pConnection: clearServiceRequests failed, reason=${reasonString(reasonCode)}")
+        result?.success(false)
+      }
     })
   }
 
@@ -514,6 +539,13 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
     if (friendlyServiceRequest != null) {
       discover()
       return
+    }
+    // A query registered anew starts with no answers, so the names stream
+    // lists exactly the phones that answered this query (callers keep the
+    // names they learned before).
+    if (friendlyNames.isNotEmpty()) {
+      friendlyNames.clear()
+      ServiceNamesHandler.emit()
     }
     // A TXT query for the exact instance: the one-argument newInstance(type)
     // is a PTR query, whose answers only reach the PTR listener and never

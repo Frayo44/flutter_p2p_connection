@@ -86,6 +86,11 @@ class MethodChannelFlutterP2pConnection extends FlutterP2pConnectionPlatform {
   }
 
   @override
+  Future<bool?> stopServiceNameDiscovery() async {
+    return await methodChannel.invokeMethod<bool?>("stopServiceNameDiscovery");
+  }
+
+  @override
   Future<bool?> disconnect() async {
     final disconnected = await methodChannel.invokeMethod<bool?>("disconnect");
     return disconnected;

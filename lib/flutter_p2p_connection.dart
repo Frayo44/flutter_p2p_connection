@@ -157,8 +157,20 @@ class FlutterP2pConnection {
         "ERROR";
   }
 
-  /// P2P device address -> friendly name announced by that phone. Emits the
-  /// whole map on listen and whenever a name is learned or changes.
+  /// Withdraws the name query that [discoverServiceNames] registered. While
+  /// it is registered, every discovery round (discover() included) also
+  /// queries nearby devices for it, which keeps the radio busy; withdraw it
+  /// once the names are known.
+  Future<bool> stopServiceNameDiscovery() async {
+    return (await FlutterP2pConnectionPlatform.instance
+            .stopServiceNameDiscovery()) ==
+        true;
+  }
+
+  /// P2P device address -> friendly name announced by that phone, for the
+  /// phones that answered the current name query (a query registered again
+  /// after [stopServiceNameDiscovery] starts empty). Emits the whole map on
+  /// listen and whenever a name is learned or changes.
   Stream<Map<String, String>> streamServiceNames() {
     const namesChannel = EventChannel("flutter_p2p_connection_serviceNames");
     return namesChannel.receiveBroadcastStream().map((payload) {

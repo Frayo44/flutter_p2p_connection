@@ -73,6 +73,11 @@ abstract class FlutterP2pConnectionPlatform extends PlatformInterface {
         'discoverServiceNames() has not been implemented.');
   }
 
+  Future<bool?> stopServiceNameDiscovery() {
+    throw UnimplementedError(
+        'stopServiceNameDiscovery() has not been implemented.');
+  }
+
   Future<bool?> disconnect() {
     throw UnimplementedError('disconnect() has not been implemented.');
   }
