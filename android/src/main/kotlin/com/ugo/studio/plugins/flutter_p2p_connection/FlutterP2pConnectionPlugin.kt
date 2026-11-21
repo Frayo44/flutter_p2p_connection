@@ -64,6 +64,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   // and reads the other phones' records. Keyed by the P2P device address,
   // which is what the peer list reports too.
   private val friendlyServiceType = "_saycheese._tcp"
+  private val friendlyInstanceName = "SayCheese"
   private var friendlyServiceRequest: WifiP2pDnsSdServiceRequest? = null
   private var friendlyListenersSet = false
   private val friendlyNames = HashMap<String, String>()
@@ -451,7 +452,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
       return
     }
     val record = mapOf("n" to name, "v" to "1")
-    val info = WifiP2pDnsSdServiceInfo.newInstance("SayCheese", friendlyServiceType, record)
+    val info = WifiP2pDnsSdServiceInfo.newInstance(friendlyInstanceName, friendlyServiceType, record)
     wifimanager.addLocalService(wifichannel, info, object : WifiP2pManager.ActionListener {
       override fun onSuccess() {
         Log.d(TAG, "FlutterP2pConnection: advertising friendly name")
@@ -465,6 +466,13 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
   }
 
   fun clearAdvertisedName(result: Result) {
+    // The name query belongs to this channel as well, and initialize()
+    // opens a fresh channel without closing this one: drop the query here
+    // or every re-initialize leaves one more copy running.
+    if (friendlyServiceRequest != null) {
+      wifimanager.clearServiceRequests(wifichannel, null)
+      friendlyServiceRequest = null
+    }
     wifimanager.clearLocalServices(wifichannel, object : WifiP2pManager.ActionListener {
       override fun onSuccess() { result.success(true) }
       override fun onFailure(reasonCode: Int) { result.success(false) }
@@ -486,6 +494,7 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
             (fullDomainName?.lowercase()?.contains(friendlyServiceType) == true)) {
             if (friendlyNames[device.deviceAddress] != name) {
               friendlyNames[device.deviceAddress] = name
+              Log.d(TAG, "FlutterP2pConnection: announced name from ${device.deviceAddress}")
               ServiceNamesHandler.emit()
             }
           }
@@ -506,7 +515,10 @@ class FlutterP2pConnectionPlugin: FlutterPlugin, MethodCallHandler, ActivityAwar
       discover()
       return
     }
-    val request = WifiP2pDnsSdServiceRequest.newInstance(friendlyServiceType)
+    // A TXT query for the exact instance: the one-argument newInstance(type)
+    // is a PTR query, whose answers only reach the PTR listener and never
+    // carry the name.
+    val request = WifiP2pDnsSdServiceRequest.newInstance(friendlyInstanceName, friendlyServiceType)
     wifimanager.addServiceRequest(wifichannel, request, object : WifiP2pManager.ActionListener {
       override fun onSuccess() {
         friendlyServiceRequest = request
